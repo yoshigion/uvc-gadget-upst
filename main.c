@@ -22,7 +22,6 @@ static void usage(const char *argv0)
 	fprintf(stderr, "Available options are\n");
 	fprintf(stderr, " -c device	V4L2 source device\n");
 	fprintf(stderr, " -h		Print this help screen and exit\n");
-	fprintf(stderr, " -i image	MJPEG image\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, " <uvc device>	UVC device instance specifier\n");
 	fprintf(stderr, "\n");
