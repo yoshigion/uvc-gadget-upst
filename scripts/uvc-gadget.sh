@@ -4,15 +4,39 @@
 set -e
 #set -x
 
-CONFIGFS="/sys/kernel/config"
-GADGET="$CONFIGFS/usb_gadget"
-VID="0x0525"
-PID="0xa4a2"
-SERIAL="0123456789"
-MANUF=$(hostname)
-PRODUCT="UVC Gadget"
+export LD_LIBRARY_PATH=/lib:/usr/lib:/usr/local/lib
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
 
-USBFILE=/root/usbstorage.img
+### User Setting
+S_CONFIGFS="/sys/kernel/config"
+S_GADGET="${S_CONFIGFS}/usb_gadget"
+S_G_DIR="g1"
+
+# Device descriptor Setting
+# http://isticktoit.net/?p=1383
+BCD_USB=0x0200		# USB 2.0
+VENDOR_ID=0x0525	# Netchip Technology, Inc
+PRODUCT_ID=0xA4A2	# Linux-USB Ethernet/RNDIS Gadget
+BCD_DEVICE=0x0090	# v 0.9
+B_DEVICE_CLASS=0xEF	# Miscellaneous
+B_DEVICE_SUBCLASS=0x02	# Interface Association Descriptor
+B_DEVICE_PROTOCOL=0x01	# Interface Association Descriptor
+LANGUAGE_ID=0x0409	# English strings
+S_MANUFACTURER=$(hostname)
+S_PRODUCT="UVC Gadget"
+S_SERIALNUMBER="0123456789"
+
+# Configuration descriptor Setting
+S_CONFIGURATION="UVC"
+BM_ATTRIBUTES=0xC0	# self power
+STREAMING_INTERVAL=1
+# packet size: uvc gadget max size is 3k...
+STREAMING_MAXPACKET=1024
+#STREAMING_MAXPACKET=2048
+#STREAMING_MAXPACKET=3072
+MAX_POWER=500
+
+USBFILE=/root/usbstorage.img	# Mass Storage ext4 image
 
 BOARD=$(strings /proc/device-tree/model)
 
@@ -95,12 +119,14 @@ create_frame() {
 	FORMAT=$4
 	NAME=$5
 
-	wdir=functions/$FUNCTION/streaming/$FORMAT/$NAME/${HEIGHT}p
+	wdir=functions/${FUNCTION}/streaming/${FORMAT}/${NAME}/${HEIGHT}p
 
 	mkdir -p $wdir
 	echo $WIDTH > $wdir/wWidth
 	echo $HEIGHT > $wdir/wHeight
-	echo $(( $WIDTH * $HEIGHT * 2 )) > $wdir/dwMaxVideoFrameBufferSize
+	echo 10000000 > $wdir/dwMinBitRate
+	echo 100000000 > $wdir/dwMaxBitRate
+	echo $(( $WIDTH * $HEIGHT * 4 )) > $wdir/dwMaxVideoFrameBufferSize
 	cat <<EOF > $wdir/dwFrameInterval
 666666
 100000
@@ -115,34 +141,44 @@ create_uvc() {
 	CONFIG=$1
 	FUNCTION=$2
 
-	echo "	Creating UVC gadget functionality : $FUNCTION"
-	mkdir functions/$FUNCTION
+	echo "	Creating UVC gadget functionality : ${FUNCTION}"
+	mkdir functions/${FUNCTION}
 
-	create_frame $FUNCTION 640 360 uncompressed u
-	create_frame $FUNCTION 1280 720 uncompressed u
-	create_frame $FUNCTION 320 180 uncompressed u
-	create_frame $FUNCTION 1920 1080 mjpeg m
+	create_frame ${FUNCTION} 640 360 uncompressed u
+	create_frame ${FUNCTION} 1280 720 uncompressed u
+	create_frame ${FUNCTION} 320 180 uncompressed u
+	create_frame ${FUNCTION} 1920 1080 mjpeg m
 
-	mkdir functions/$FUNCTION/streaming/header/h
-	cd functions/$FUNCTION/streaming/header/h
+	mkdir functions/${FUNCTION}/streaming/header/h
+	cd functions/${FUNCTION}/streaming/header/h
 	ln -s ../../uncompressed/u
 	ln -s ../../mjpeg/m
-	cd ../../class/fs
+	cd ../../class/fs		# ${S_G_DIR}/functions/${FUNCTION}/streaming/class/fs
 	ln -s ../../header/h
-	cd ../../class/hs
+	cd ../../class/hs		# ${S_G_DIR}/functions/${FUNCTION}/streaming/class/hs
 	ln -s ../../header/h
-	cd ../../../control
+	cd ../../../control		# ${S_G_DIR}/functions/${FUNCTION}/control
 	mkdir header/h
+	#echo 300000000 > header/h/dwClockFrequency
 	ln -s header/h class/fs
-	ln -s header/h class/ss
-	cd ../../../
+	#[ -e class/hs ] && ln -sf header/h class/hs
+
+	cd ../../../			# ${S_G_DIR}
+
+	# Set the streaming interval
+	#echo ${STREAMING_INTERVAL}  > functions/${FUNCTION}/streaming_interval
 
 	# Set the packet size: uvc gadget max size is 3k...
-	echo 3072 > functions/$FUNCTION/streaming_maxpacket
-	echo 2048 > functions/$FUNCTION/streaming_maxpacket
-	echo 1024 > functions/$FUNCTION/streaming_maxpacket
+	echo ${STREAMING_MAXPACKET} > functions/${FUNCTION}/streaming_maxpacket
 
-	ln -s functions/$FUNCTION configs/c.1
+	# Create Configuration Instance
+	mkdir -p $CONFIG/strings/${LANGUAGE_ID}
+	echo ${S_CONFIGURATION}     > ${CONFIG}/strings/${LANGUAGE_ID}/configuration
+	echo ${MAX_POWER}           > ${CONFIG}/MaxPower
+	#echo ${BM_ATTRIBUTES}      > ${CONFIG}/bmAttributes
+
+	# Bind Function Instance to Configuration Instance
+	ln -s functions/${FUNCTION} ${CONFIG}
 }
 
 delete_uvc() {
@@ -170,13 +206,19 @@ delete_uvc() {
 case "$1" in
     start)
 	echo "Creating the USB gadget"
-	#echo "Loading composite module"
-	#modprobe libcomposite
+	echo "Loading composite module"
+	modprobe libcomposite
 
-	echo "Creating gadget directory g1"
-	mkdir -p $GADGET/g1
+	echo "Mounting DebugFS"
+	[ ! -d /sys/kernel/debug/tracing ] && mount -t debugfs nodev /sys/kernel/debug
 
-	cd $GADGET/g1
+	echo "Mounting USB Gadget ConfigFS"
+	[ ! -d ${S_GADGET} ] && mount -t configfs none ${S_CONFIGFS}
+
+	echo "Creating gadget directory ${S_G_DIR}"
+	mkdir -p ${S_GADGET}/${S_G_DIR}
+
+	cd ${S_GADGET}/${S_G_DIR}
 	if [ $? -ne 0 ]; then
 	    echo "Error creating usb gadget in configfs"
 	    exit 1;
@@ -185,25 +227,31 @@ case "$1" in
 	fi
 
 	echo "Setting Vendor and Product ID's"
-	echo $VID > idVendor
-	echo $PID > idProduct
+	echo ${BCD_USB}           > bcdUSB
+	echo ${VENDOR_ID}         > idVendor
+	echo ${PRODUCT_ID}        > idProduct
+	echo ${BCD_DEVICE}        > bcdDevice
+	echo ${B_DEVICE_CLASS}    > bDeviceClass
+	echo ${B_DEVICE_SUBCLASS} > bDeviceSubClass
+	echo ${B_DEVICE_PROTOCOL} > bDeviceProtocol
 	echo "OK"
 
 	echo "Setting English strings"
-	mkdir -p strings/0x409
-	echo $SERIAL > strings/0x409/serialnumber
-	echo $MANUF > strings/0x409/manufacturer
-	echo $PRODUCT > strings/0x409/product
+	mkdir -p strings/${LANGUAGE_ID}
+	echo ${S_MANUFACTURER} > strings/${LANGUAGE_ID}/manufacturer
+	echo ${S_PRODUCT}      > strings/${LANGUAGE_ID}/product
+	echo ${S_SERIALNUMBER} > strings/${LANGUAGE_ID}/serialnumber
 	echo "OK"
 
 	echo "Creating Config"
 	mkdir configs/c.1
-	mkdir configs/c.1/strings/0x409
+	mkdir configs/c.1/strings/${LANGUAGE_ID}
 
 	echo "Creating functions..."
 	#create_msd configs/c.1 mass_storage.0 $USBFILE
 	create_uvc configs/c.1 uvc.0
 	#create_uvc configs/c.1 uvc.1
+	#udevadm settle -t 5 || :
 	echo "OK"
 
 	echo "Binding USB Device Controller"
@@ -211,6 +259,22 @@ case "$1" in
 	echo peripheral > $UDC_ROLE
 	cat $UDC_ROLE
 	echo "OK"
+
+	if [ -e /dev/video0 ]; then
+	  echo "Success"
+	  #modprobe vivid
+	  echo "Run uvc-gadet to send video stream"
+	  uvc-gadget -h || true
+	  v4l2-ctl --list-devices
+	  #v4l2-ctl -c brightness=50
+	  v4l2-ctl -c auto_exposure=0
+	  v4l2-ctl -c auto_exposure_bias=8
+	  v4l2-ctl -c contrast=20
+	  v4l2-ctl -c video_bitrate=25000000
+	  echo "usage) uvc-gadget -f1 -s2 -r1 -u /dev/video1 -v /dev/video0"
+	else
+	  echo "Failure: Failed to initialize UVC video output device."
+	fi
 	;;
 
     stop)
@@ -218,7 +282,7 @@ case "$1" in
 
 	set +e # Ignore all errors here on a best effort
 
-	cd $GADGET/g1
+	cd ${S_GADGET}/${S_G_DIR}
 
 	if [ $? -ne 0 ]; then
 	    echo "Error: no configfs gadget found"
@@ -234,23 +298,23 @@ case "$1" in
 	#delete_msd configs/c.1 mass_storage.0
 
 	echo "Clearing English strings"
-	rmdir strings/0x409
+	rmdir strings/${LANGUAGE_ID}
 	echo "OK"
 
 	echo "Cleaning up configuration"
-	rmdir configs/c.1/strings/0x409
+	rmdir configs/c.1/strings/${LANGUAGE_ID}
 	rmdir configs/c.1
 	echo "OK"
 
 	echo "Removing gadget directory"
-	cd $GADGET
-	rmdir g1
+	cd ${S_GADGET}
+	rmdir ${S_G_DIR}
 	cd /
 	echo "OK"
 
-	#echo "Disable composite USB gadgets"
-	#modprobe -r libcomposite
-	#echo "OK"
+	echo "Disable composite USB gadgets"
+	modprobe -r libcomposite
+	echo "OK"
 	;;
     *)
 	echo "Usage : $0 {start|stop}"
